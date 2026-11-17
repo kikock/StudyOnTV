@@ -9,7 +9,7 @@ import org.json.JSONObject
 import java.util.Calendar
 import java.util.UUID
 
-class LocalStore(context: Context, databaseName: String = "studyontv.db") : SQLiteOpenHelper(context, databaseName, null, 9) {
+class LocalStore(context: Context, databaseName: String = "studyontv.db") : SQLiteOpenHelper(context, databaseName, null, 10) {
     companion object {
         val DEFAULT_PRAISE = listOf("太棒了！", "答对啦！", "完全正确！", "真厉害！", "好样的，继续保持！", "漂亮！你越来越熟练了")
         val DEFAULT_ENCOURAGE = listOf("没关系，记住正确答案就好", "差一点点，下一题加油！", "错误也是学习的一部分", "别灰心，再接再厉！")
@@ -59,12 +59,16 @@ class LocalStore(context: Context, databaseName: String = "studyontv.db") : SQLi
             backfillQuestionColumns(db)
             createQuestionIndexes(db)
         }
+        if (oldVersion < 10) createQuestionIndexes(db)
     }
 
     private fun createQuestionIndexes(db: SQLiteDatabase) {
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_questions_bank ON questions(bank)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_questions_type ON questions(type)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_questions_enabled ON questions(enabled)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_questions_subject ON questions(subject)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_questions_level ON questions(level)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_questions_scope ON questions(enabled, subject, level, bank)")
     }
 
     /** 把老库里 details 的 bank / type 抄进新列；分批读，避免几万道题一次性塞进内存。 */
@@ -595,13 +599,59 @@ class LocalStore(context: Context, databaseName: String = "studyontv.db") : SQLi
         return next
     }
 
+    private fun appendScopeFilters(
+        where: StringBuilder,
+        args: MutableList<String>,
+        subjects: List<String>,
+        levels: List<String>,
+        banks: List<String>,
+    ) {
+        if (subjects.isNotEmpty()) {
+            where.append(" AND questions.subject IN (").append(subjects.joinToString(",") { "?" }).append(")")
+            args.addAll(subjects)
+        }
+        if (levels.isNotEmpty()) {
+            where.append(" AND questions.level IN (").append(levels.joinToString(",") { "?" }).append(")")
+            args.addAll(levels)
+        }
+        if (banks.isNotEmpty()) {
+            val placeholders = banks.joinToString(",") { "?" }
+            if ("默认题库" in banks) {
+                where.append(" AND (questions.bank IN ($placeholders) OR questions.bank IS NULL OR questions.bank='')")
+            } else {
+                where.append(" AND questions.bank IN ($placeholders)")
+            }
+            args.addAll(banks)
+        }
+    }
+
+    /** 按启用题目的科目与题库过滤，直接从 SQL 读取可用年级，避免全库解析 JSON。 */
+    fun availableLevels(subjects: List<String> = emptyList(), banks: List<String> = emptyList()): List<String> {
+        val where = StringBuilder("enabled=1 AND level IS NOT NULL AND level!=''")
+        val args = mutableListOf<String>()
+        appendScopeFilters(where, args, subjects, emptyList(), banks)
+        val out = mutableListOf<String>()
+        readableDatabase.rawQuery("SELECT DISTINCT level FROM questions WHERE $where ORDER BY level ASC", args.toTypedArray()).use { c ->
+            while (c.moveToNext()) {
+                val lv = c.getString(0)
+                if (!lv.isNullOrBlank()) out.add(lv)
+            }
+        }
+        return out
+    }
+
     fun questions(subject: String? = null, level: String? = null, limit: Int = 200, spaced: Boolean = false,
                    enabledOnly: Boolean = true, sortBy: String = "random", wrongFirst: Boolean = false,
-                   coverageFirst: Boolean = false, newFirst: Boolean = false): JSONArray {
+                   coverageFirst: Boolean = false, newFirst: Boolean = false,
+                   subjects: List<String> = emptyList(), levels: List<String> = emptyList(),
+                   banks: List<String> = emptyList(), excludeId: String? = null, onlyWrong: Boolean = false): JSONArray {
         val where = StringBuilder(if (enabledOnly) "enabled=1" else "1=1")
         val args = mutableListOf<String>()
         if (!subject.isNullOrEmpty()) { where.append(" AND subject=?"); args.add(subject) }
         if (!level.isNullOrEmpty()) { where.append(" AND level=?"); args.add(level) }
+        appendScopeFilters(where, args, subjects, levels, banks)
+        if (!excludeId.isNullOrEmpty()) { where.append(" AND questions.id!=?"); args.add(excludeId) }
+        if (onlyWrong) { where.append(" AND stats.last_correct=0") }
         val out = JSONArray()
         val joinArgs = mutableListOf<String>()
         // 复习进度是每个孩子各自一份（#132），只连当前孩子那一行，否则同一个 qid 会连出多条

@@ -572,42 +572,44 @@ class LearningEngine(private val store: LocalStore) {
         val subjects = scope("quizSubjects")
         val levels = scope("quizLevels")
         val selectedLevel = round.optString("level")
+        val effectiveLevels = if (selectedLevel.isNotEmpty()) {
+            if (levels.isNotEmpty() && selectedLevel !in levels) emptyList() else listOf(selectedLevel)
+        } else levels
+        if (selectedLevel.isNotEmpty() && levels.isNotEmpty() && selectedLevel !in levels) {
+            throw IllegalArgumentException("当前答题范围没有题目，请检查题库的科目 / 年级或调整答题范围")
+        }
         val banks = scope("quizBanks")
+        val spaced = config.optBoolean("spacedRepetitionEnabled")
         val wrongFirst = config.optBoolean("wrongFirst")
-        // 覆盖优先：排序交给 SQL（同档内仍按随机 / 到期），这里只是把开关传下去
+        // 覆盖优先：排序交给 SQL（同档内仍按随机 / 到期）
         val coverageFirst = config.optBoolean("coverageFirst")
         // 新题优先（#230）：没出过的题排在前面，排序同样交给 SQL
         val newFirst = config.optBoolean("newFirst")
-        val all = store.questions(limit = 50000, spaced = config.optBoolean("spacedRepetitionEnabled"),
-            wrongFirst = wrongFirst, coverageFirst = coverageFirst, newFirst = newFirst)
-        val bank = JSONArray()
-        for (i in 0 until all.length()) {
-            val item = all.getJSONObject(i)
-            if (subjects.isNotEmpty() && item.optString("subject") !in subjects) continue
-            if (levels.isNotEmpty() && item.optString("level") !in levels) continue
-            if (selectedLevel.isNotEmpty() && item.optString("level") != selectedLevel) continue
-            if (banks.isNotEmpty() && item.optString("bank", "默认题库") !in banks) continue
-            bank.put(item)
-        }
-        require(bank.length() > 0) {
-            if (subjects.isNotEmpty() || levels.isNotEmpty()) "当前答题范围没有题目，请检查题库的科目 / 年级或调整答题范围" else "题库为空，请由家长添加题目"
-        }
         // 这一题是不是加练题：必须在选题前算出来，错题优先靠它决定要不要只从错题里出
         val extraEnabled = round.optJSONObject("rules")?.optBoolean("extraEnabled", true) ?: true
         val extraStage = if (round.optString("mode") == "count") false else if (round.optString("mode") == "practice") number("extra_pool") > 0
             else extraEnabled && round.optInt("answered") >= round.getInt("target")
         val last = round.optJSONObject("question")?.optString("id")
-        fun pick(onlyWrong: Boolean): JSONObject? {
-            for (i in 0 until bank.length()) {
-                val item = bank.getJSONObject(i)
-                if (item.optString("id") == last) continue
-                if (onlyWrong && item.optJSONObject("stats")?.optBoolean("lastCorrect", true) != false) continue
-                return item
-            }
-            return null
+
+        // 下推过滤条件到 SQL 并只取 1 条，避免上万题库下每次答题都全表解析 JSONObject
+        fun queryOne(excludeId: String?, onlyWrong: Boolean): JSONObject? {
+            val arr = store.questions(
+                limit = 1, spaced = spaced,
+                wrongFirst = wrongFirst, coverageFirst = coverageFirst, newFirst = newFirst,
+                subjects = subjects, levels = effectiveLevels, banks = banks,
+                excludeId = excludeId, onlyWrong = onlyWrong,
+            )
+            return if (arr.length() > 0) arr.getJSONObject(0) else null
         }
-        // 错题优先（#136）：加练题先出错题库里的题，错题不够时再按正常顺序补
-        val question = (if (wrongFirst && extraStage) pick(true) else null) ?: pick(false) ?: bank.getJSONObject(0)
+
+        // 错题优先（#136）：加练题先出错题库里的题，错题不够时再按正常顺序补；最后兜底允许重复上一题（仅 1 题时）
+        val question = (if (wrongFirst && extraStage) queryOne(last, true) else null)
+            ?: queryOne(last, false)
+            ?: (if (!last.isNullOrEmpty()) queryOne(null, false) else null)
+            ?: throw IllegalArgumentException(
+                if (subjects.isNotEmpty() || levels.isNotEmpty()) "当前答题范围没有题目，请检查题库的科目 / 年级或调整答题范围"
+                else "题库为空，请由家长添加题目"
+            )
         val presented = if (config.optBoolean("shuffleOptions")) QuestionOptions.shuffled(question) else question
         store.presented(presented.getString("id"))
         round.put("question", presented).put("nonce", UUID.randomUUID().toString())
@@ -656,14 +658,12 @@ class LearningEngine(private val store: LocalStore) {
         if (round == null || round.optString("mode") != c.getString("playMode")) {
             var selectedLevel = ""
             if (c.optBoolean("childSelectLevel")) {
-                val allowed = c.optJSONArray("quizLevels") ?: JSONArray()
-                val subjects = c.optJSONArray("quizSubjects") ?: JSONArray()
-                val banks = c.optJSONArray("quizBanks") ?: JSONArray()
-                fun accepts(a: JSONArray, value: String) = a.length() == 0 || (0 until a.length()).any { a.optString(it) == value }
-                val items = store.questions(limit = 50000)
-                val choices = (0 until items.length()).map { items.getJSONObject(it) }
-                    .filter { accepts(allowed, it.optString("level")) && accepts(subjects, it.optString("subject")) && accepts(banks, it.optString("bank", "默认题库")) }
-                    .map { it.optString("level") }.filter { it.isNotBlank() }.distinct().sorted()
+                fun toList(a: JSONArray?) = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }.filter { it.isNotEmpty() }
+                val allowed = toList(c.optJSONArray("quizLevels"))
+                val subjects = toList(c.optJSONArray("quizSubjects"))
+                val banks = toList(c.optJSONArray("quizBanks"))
+                val choices = store.availableLevels(subjects, banks)
+                    .filter { allowed.isEmpty() || it in allowed }
                 require(choices.isNotEmpty()) { "请先为启用题目标注年级，或关闭孩子选择年级" }
                 if (level == null && choices.size > 1) return JSONObject().put("chooseLevel", JSONArray(choices)).put("status", st)
                 selectedLevel = level ?: choices.single()

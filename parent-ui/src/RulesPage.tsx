@@ -285,24 +285,19 @@ export default function RulesPage({ state, sessionId }: { state: any; sessionId:
   const c = form.watch();
   const client = useQueryClient();
   const [tab, setTab] = useState<'task' | 'time' | 'scope' | 'more'>('task');
-  // 必须和 QuestionBank 用完全相同的 URL：两处共用 ['bank',…] 这个 queryKey，
-  // URL 不一致时先挂载的一方会把不完整的数据写进缓存（暂停的题在题库页凭空消失）。
-  const bank = useQuery({
-    queryKey: ['bank', sessionId],
-    queryFn: () => api('/api/questions?limit=50000&enabledOnly=false'),
+  // 复用轻量级 /api/questions/meta 接口（与题库页共用 ['bank-meta', sessionId] 缓存），
+  // 避免上万道题时拉取 50,000 条完整题目导致超时或白等，致使科目/年级选项为空。
+  const bankMeta = useQuery({
+    queryKey: ['bank-meta', sessionId],
+    queryFn: () => api('/api/questions/meta'),
+    staleTime: 30000,
   });
   const device = useQuery({ queryKey: ['device', sessionId], queryFn: () => api('/api/device') });
   // Radix 的 SelectItem 不接受空字符串，所以「跟随设备」在控件里用 device 代替
   const zoneChoices = zoneOptions.map(([value, label]) => [value || 'device', label] as [string, string]);
-  const scopeSubjects: any[] = [
-    ...new Set((bank.data?.items || []).map((q: any) => q.subject).filter(Boolean)),
-  ].sort();
-  const scopeLevels: any[] = [
-    ...new Set((bank.data?.items || []).map((q: any) => q.level).filter(Boolean)),
-  ].sort();
-  const scopeBanks: any[] = [
-    ...new Set((bank.data?.items || []).map((q: any) => q.bank || '默认题库')),
-  ].sort();
+  const scopeSubjects: any[] = Array.isArray(bankMeta.data?.subjects) ? bankMeta.data.subjects : [];
+  const scopeLevels: any[] = Array.isArray(bankMeta.data?.levels) ? bankMeta.data.levels : [];
+  const scopeBanks: any[] = Array.isArray(bankMeta.data?.banks) ? bankMeta.data.banks : [];
   const inScope = (key: any, value: string) => Array.isArray(c[key]) && c[key].includes(value);
   const change = (key: any, value: any) => form.setValue(key, value, { shouldDirty: true, shouldValidate: true });
   const toggleScope = (key: any, value: string) => {
