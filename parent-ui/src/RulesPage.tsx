@@ -296,7 +296,19 @@ export default function RulesPage({ state, sessionId }: { state: any; sessionId:
   // Radix 的 SelectItem 不接受空字符串，所以「跟随设备」在控件里用 device 代替
   const zoneChoices = zoneOptions.map(([value, label]) => [value || 'device', label] as [string, string]);
   const scopeSubjects: any[] = Array.isArray(bankMeta.data?.subjects) ? bankMeta.data.subjects : [];
-  const scopeLevels: any[] = Array.isArray(bankMeta.data?.levels) ? bankMeta.data.levels : [];
+  const rawLevels: string[] = Array.isArray(bankMeta.data?.levels) ? bankMeta.data.levels : [];
+  const levelOrder = [
+    '一年级', '二年级', '三年级', '四年级', '五年级', '六年级',
+    '七年级', '八年级', '九年级', '高一', '高二', '高三', '高中', '小学', '初中',
+  ];
+  const scopeLevels: string[] = [...rawLevels].sort((a, b) => {
+    const ia = levelOrder.indexOf(a);
+    const ib = levelOrder.indexOf(b);
+    if (ia >= 0 && ib >= 0) return ia - ib;
+    if (ia >= 0) return -1;
+    if (ib >= 0) return 1;
+    return a.localeCompare(b, 'zh-Hans-CN');
+  });
   const scopeBanks: any[] = Array.isArray(bankMeta.data?.banks) ? bankMeta.data.banks : [];
   const inScope = (key: any, value: string) => Array.isArray(c[key]) && c[key].includes(value);
   const change = (key: any, value: any) => form.setValue(key, value, { shouldDirty: true, shouldValidate: true });
@@ -687,73 +699,72 @@ export default function RulesPage({ state, sessionId }: { state: any; sessionId:
                   </FieldContent>
                   {toggle('childSelectLevel')}
                 </Field>
-                <Field orientation="responsive" className="py-3.5">
-                  <FieldContent>
-                    <FieldTitle>题库</FieldTitle>
-                    <FieldDescription className="text-xs leading-5">只从选中的题库抽题</FieldDescription>
-                  </FieldContent>
-                  <div className="flex min-w-0 flex-wrap gap-2">
-                    {scopeBanks.map(v => (
-                      <FieldLabel
-                        key={v}
-                        className="cursor-pointer rounded-lg border border-border/70 px-3 py-2 font-normal transition-colors hover:bg-muted/40 has-data-[state=checked]:border-primary/40 has-data-[state=checked]:bg-primary/5"
-                      >
-                        <Checkbox
-                          checked={inScope('quizBanks', v)}
-                          onCheckedChange={() => toggleScope('quizBanks', v)}
-                        />
-                        <span>{v}</span>
-                      </FieldLabel>
-                    ))}
-                  </div>
-                </Field>
-                <Field orientation="responsive" className="py-3.5">
-                  <FieldContent>
-                    <FieldTitle>科目</FieldTitle>
-                    <FieldDescription className="text-xs leading-5">只从选中的科目抽题</FieldDescription>
-                  </FieldContent>
-                  <div className="flex min-w-0 flex-wrap gap-2">
-                    {scopeSubjects.length ? (
-                      scopeSubjects.map(v => (
-                        <FieldLabel
-                          key={v}
-                          className="cursor-pointer rounded-lg border border-border/70 px-3 py-2 font-normal transition-colors hover:bg-muted/40 has-data-[state=checked]:border-primary/40 has-data-[state=checked]:bg-primary/5"
-                        >
-                          <Checkbox
-                            checked={inScope('quizSubjects', v)}
-                            onCheckedChange={() => toggleScope('quizSubjects', v)}
-                          />
-                          <span>{v}</span>
-                        </FieldLabel>
-                      ))
-                    ) : (
-                      <FieldDescription className="text-xs">题库里还没有科目</FieldDescription>
-                    )}
-                  </div>
-                </Field>
-                <Field orientation="responsive" className="py-3.5">
-                  <FieldContent>
-                    <FieldTitle>年级</FieldTitle>
-                  </FieldContent>
-                  <div className="flex min-w-0 flex-wrap gap-2">
-                    {scopeLevels.length ? (
-                      scopeLevels.map(v => (
-                        <FieldLabel
-                          key={v}
-                          className="cursor-pointer rounded-lg border border-border/70 px-3 py-2 font-normal transition-colors hover:bg-muted/40 has-data-[state=checked]:border-primary/40 has-data-[state=checked]:bg-primary/5"
-                        >
-                          <Checkbox
-                            checked={inScope('quizLevels', v)}
-                            onCheckedChange={() => toggleScope('quizLevels', v)}
-                          />
-                          <span>{v}</span>
-                        </FieldLabel>
-                      ))
-                    ) : (
-                      <FieldDescription className="text-xs">题库里还没有年级</FieldDescription>
-                    )}
-                  </div>
-                </Field>
+                {(
+                  [
+                    { key: 'quizBanks', title: '题库', desc: '只从选中的题库抽题；不选即全部题库', items: scopeBanks, empty: '题库里还没有题库' },
+                    { key: 'quizSubjects', title: '科目', desc: '只从选中的科目抽题；不选即全部科目', items: scopeSubjects, empty: '题库里还没有科目' },
+                    { key: 'quizLevels', title: '年级', desc: '只从选中的年级抽题；不选即全部年级', items: scopeLevels, empty: '题库里还没有年级' },
+                  ] as const
+                ).map(({ key, title, desc, items, empty }) => {
+                  const selectedCount = Array.isArray(c[key]) ? c[key].length : 0;
+                  return (
+                    <Field key={key} orientation="vertical" className="gap-3 py-4">
+                      <div className="flex w-full items-start justify-between gap-4">
+                        <FieldContent>
+                          <FieldTitle>
+                            <span>{title}</span>
+                            <span className="ms-1.5 text-xs font-normal text-muted-foreground">
+                              {selectedCount > 0 ? `已选 ${selectedCount} 项` : '全部'}
+                            </span>
+                          </FieldTitle>
+                          <FieldDescription className="text-xs leading-5">{desc}</FieldDescription>
+                        </FieldContent>
+                        {items.length > 0 && (
+                          <div className="flex shrink-0 items-center gap-1">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                              onClick={() => change(key, [...items])}
+                            >
+                              全选
+                            </Button>
+                            {selectedCount > 0 && (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                                onClick={() => change(key, [])}
+                              >
+                                清空
+                              </Button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex w-full min-w-0 flex-wrap gap-2">
+                        {items.length ? (
+                          items.map(v => (
+                            <FieldLabel
+                              key={v}
+                              className="cursor-pointer rounded-lg border border-border/70 px-3 py-1.5 text-sm font-normal transition-colors hover:bg-muted/40 has-data-[state=checked]:border-primary/40 has-data-[state=checked]:bg-primary/5"
+                            >
+                              <Checkbox
+                                checked={inScope(key, v)}
+                                onCheckedChange={() => toggleScope(key, v)}
+                              />
+                              <span>{v}</span>
+                            </FieldLabel>
+                          ))
+                        ) : (
+                          <FieldDescription className="text-xs">{empty}</FieldDescription>
+                        )}
+                      </div>
+                    </Field>
+                  );
+                })}
                 <Field orientation="responsive" className="py-3.5">
                   <FieldContent>
                     <FieldTitle>没做过的题先出</FieldTitle>
